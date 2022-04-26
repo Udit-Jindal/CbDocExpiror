@@ -1,28 +1,22 @@
 package com.sta.utils.cb.cbdocexpiror;
 
 import com.couchbase.client.java.Bucket;
+import com.couchbase.client.java.document.JsonDocument;
+import com.couchbase.client.java.document.json.JsonObject;
 import com.sta.utils.dfs.FsUtils;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
+import java.util.TimeZone;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 
 public class CbDocExpiror
 {
-
-    private static DbManager _db;
-    private final TimeRangeViewReaderDelete _reader;
-
-    private final Bucket _cbBucket;
-
-    public CbDocExpiror(TimeRangeViewReaderDelete reader, Bucket cbBucket)
-    {
-        _reader = reader;
-
-        _cbBucket = cbBucket;
-    }
 
     public static void main(String[] args) throws Exception
     {
@@ -32,7 +26,6 @@ public class CbDocExpiror
         }
 
         JSONObject jsonConfig = FsUtils.readJsonFile(args[0]);
-//        JSONObject jsonConfig = FsUtils.readJsonFile("D:\\adpushup\\CbDocExpiror.json");
 
         //<editor-fold defaultstate="collapsed" desc="Read Cb Config">
         JSONArray cbIps;
@@ -166,11 +159,21 @@ public class CbDocExpiror
         Long endKey = currentTime.getTimeInMillis();
         //</editor-fold>
 
-        _db = new DbManager(cbIpArray, cbUser, cbPassword);
+        Integer batchSize = ((Long) jsonConfig.get("batchSize")).intValue();
+        Integer threadCnt = ((Long) jsonConfig.get("threads")).intValue();
 
-        Bucket cbBucket = _db.getBucket(cbBucketName);
+        String monitorDocId = (String) jsonConfig.get("monitorDocId");
 
-        CbDocExpiror expire = new CbDocExpiror(new TimeRangeViewReaderDelete(cbBucket, cbDesignDocName, cbViewName, startKey, endKey), cbBucket);
+        Boolean autoMode;
+
+        if (jsonConfig.get("autoMode") != null)
+        {
+            autoMode = (Boolean) jsonConfig.get("autoMode");
+        }
+        else
+        {
+            autoMode = false;
+        }
 
         System.out.println("");
         System.out.println("");
@@ -188,57 +191,150 @@ public class CbDocExpiror
         System.out.println("Cb Design Doc Name: " + cbDesignDocName);
         System.out.println("Cb View Name: " + cbViewName);
 
-        Calendar calTemp = Calendar.getInstance();
-        calTemp.setTimeInMillis(startKey);
-        System.out.println("From Date: " + calTemp.get(Calendar.YEAR) + "-" + (calTemp.get(Calendar.MONTH) + 1) + "-" + calTemp.get(Calendar.DATE) + ":" + calTemp.get(Calendar.HOUR_OF_DAY));
+        System.out.println("Batch Size: " + batchSize);
+        System.out.println("Threads: " + threadCnt);
+        System.out.println("Monitor Doc Id: " + monitorDocId);
+        System.out.println("Auto Mode: " + autoMode);
 
-        calTemp = Calendar.getInstance();
-        calTemp.setTimeInMillis(endKey);
-        System.out.println("To Date: " + calTemp.get(Calendar.YEAR) + "-" + (calTemp.get(Calendar.MONTH) + 1) + "-" + calTemp.get(Calendar.DATE) + ":" + calTemp.get(Calendar.HOUR_OF_DAY));
-
-        System.out.println("");
-        System.out.println("********************************************************************************************");
-        System.out.println("********************************************************************************************");
-        System.out.println("");
-        System.out.println("");
-        System.out.println("");
-        System.out.println("");
-        System.out.println("");
-
-        System.out.println("Waiting for 10 sec before starting.");
-        System.out.println("");
-        System.out.println("");
-        System.out.println("");
-        System.out.println("");
         TimeUnit.SECONDS.sleep(10);
 
-        System.out.println("**************************************Delete data START************************************************");
-
-        expire.deleteDataAsync();
-
-        System.out.println("**************************************Delete data FINISH************************************************");
-    }
-
-    private void deleteDataAsync() throws Exception
-    {
         while (true)
         {
-            try
+            DbManager db = new DbManager(cbIpArray, cbUser, cbPassword);
+
+            Bucket cbBucket = db.getBucket(cbBucketName);
+
+            long startHourKey;
+            long endHourKey;
+
+            if (autoMode)
             {
-                List<String> docIds = _reader.getNext(5000, 30000);
-                if (docIds.isEmpty())
-                {
-                    System.out.println("Doc list empty. Breaking.");
-                    break;
-                }
-
-                DbManager.bulkDelete(_cbBucket, docIds, 1000 * 60 * 5, 1);
-
-                System.out.println("Deleted:" + docIds.size());
+                startHourKey = 1546300800000l;
+                endHourKey = getArchiveInfo(cbBucket, monitorDocId);
             }
-            catch (Exception ex)
+            else
             {
-                System.out.println("Exception." + ex);
+                startHourKey = startKey;
+                endHourKey = endKey;
+            }
+
+            System.out.println("");
+            System.out.println("");
+            System.out.println("");
+            System.out.println("");
+            System.out.println("");
+
+            Calendar calTemp = Calendar.getInstance();
+            calTemp.setTimeInMillis(startHourKey);
+            System.out.println("From Date: " + calTemp.get(Calendar.YEAR) + "-" + (calTemp.get(Calendar.MONTH) + 1) + "-" + calTemp.get(Calendar.DATE) + ":" + calTemp.get(Calendar.HOUR_OF_DAY));
+
+            calTemp = Calendar.getInstance();
+            calTemp.setTimeInMillis(endHourKey);
+            System.out.println("To Date: " + calTemp.get(Calendar.YEAR) + "-" + (calTemp.get(Calendar.MONTH) + 1) + "-" + calTemp.get(Calendar.DATE) + ":" + calTemp.get(Calendar.HOUR_OF_DAY));
+
+            System.out.println("**************************************Delete data START************************************************");
+
+            TimeRangeViewReaderDelete viewReader = new TimeRangeViewReaderDelete(cbBucket, cbDesignDocName, cbViewName, startHourKey, endHourKey);
+
+            CountDownLatch latch = new CountDownLatch(threadCnt);
+
+            ExecutorService threadPool = Executors.newFixedThreadPool(threadCnt);
+
+            //<editor-fold defaultstate="collapsed" desc="Delete Docs">
+            for (int counter = 0; counter < threadCnt; counter++)
+            {
+                DataDeleteThread dataWorker = new DataDeleteThread(cbBucket, viewReader, latch, batchSize);
+
+                threadPool.execute(dataWorker);
+            }
+            //</editor-fold>
+
+            latch.await();
+
+            if (viewReader.isEmpty() && autoMode)
+            {
+                System.out.println("Reader Empty. Waiting for 5 minutes.");
+
+                cbBucket.close();
+                db.close();
+
+                TimeUnit.MINUTES.sleep(5);
+
+                System.out.println("Wait time over. Restarting now.");
+            }
+
+            if (viewReader.isEmpty() && !autoMode)
+            {
+                System.out.println("**************************************Delete data FINISH************************************************");
+                break;
+            }
+        }
+    }
+
+    private static Long getArchiveInfo(Bucket cbBucket, String monitorDocId)
+    {
+        Calendar date = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+
+        JsonDocument doc = cbBucket.get(monitorDocId, 30, TimeUnit.SECONDS);
+
+        JsonObject json = doc.content();
+
+        date.set(json.getInt("year"), json.getInt("month") - 1, json.getInt("date"), json.getInt("hour") - 1, 0, 0);// -1 in month, since January = 0.
+
+        date.set(Calendar.MILLISECOND, 0); //reset
+
+        return date.getTimeInMillis();
+    }
+
+    static class DataDeleteThread extends Thread
+    {
+
+        //variables
+        private final Bucket _bucket;
+        private final TimeRangeViewReaderDelete _reader;
+
+        private final CountDownLatch _latch;
+
+        private final Integer _batchSize;
+
+        Exception _threadException;
+
+        //constructor
+        public DataDeleteThread(Bucket bucket, TimeRangeViewReaderDelete reader, CountDownLatch latch, Integer batchSize)
+        {
+            _bucket = bucket;
+            _reader = reader;
+
+            _latch = latch;
+            _batchSize = batchSize;
+        }
+
+        //public
+        @Override
+        public void run()
+        {
+
+            while (!_reader.isEmpty())
+            {
+                try
+                {
+                    List<String> docIds = _reader.getNext(_batchSize, 30000);
+                    if (docIds.isEmpty() || _reader.isEmpty())
+                    {
+                        System.out.println("Doc list empty. Breaking.");
+                        _latch.countDown();
+
+                        break;
+                    }
+
+                    DbManager.bulkDelete(_bucket, docIds, 1000 * 60 * 5, 1);
+
+                    System.out.println("Deleted:" + docIds.size());
+                }
+                catch (Exception ex)
+                {
+                    System.out.println("Exception. " + ex);
+                }
             }
         }
     }
