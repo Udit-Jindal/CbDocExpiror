@@ -251,8 +251,18 @@ public class CbDocExpiror
 
             latch.await();
 
-            cbBucket.close();
-            db.close();
+            try
+            {
+                threadPool.shutdownNow();
+
+                cbBucket.close();
+                db.close();
+            }
+            catch (Exception ex)
+            {
+                System.out.println("Exception in closing resources. ");
+                ex.printStackTrace();
+            }
 
             if (viewReader.isEmpty() && autoMode)
             {
