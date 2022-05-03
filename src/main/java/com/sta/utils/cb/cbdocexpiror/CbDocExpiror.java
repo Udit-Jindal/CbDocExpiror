@@ -251,12 +251,22 @@ public class CbDocExpiror
 
             latch.await();
 
-            if (viewReader.isEmpty() && autoMode)
+            try
             {
-                System.out.println("Reader Empty. Waiting for 5 minutes.");
+                threadPool.shutdownNow();
 
                 cbBucket.close();
                 db.close();
+            }
+            catch (Exception ex)
+            {
+                System.out.println("Exception in closing resources. ");
+                ex.printStackTrace();
+            }
+
+            if (viewReader.isEmpty() && autoMode)
+            {
+                System.out.println("Reader Empty. Waiting for 5 minutes.");
 
                 TimeUnit.MINUTES.sleep(5);
 
@@ -279,7 +289,7 @@ public class CbDocExpiror
 
         JsonObject json = doc.content();
 
-        date.set(json.getInt("year"), json.getInt("month") - 1, json.getInt("date"), json.getInt("hour") - 1, 0, 0);// -1 in month, since January = 0.
+        date.set(json.getInt("year"), json.getInt("month") - 1, json.getInt("date"), json.getInt("hour"), 0, 0);// -1 in month, since January = 0.
 
         date.set(Calendar.MILLISECOND, 0); //reset
 
@@ -318,16 +328,15 @@ public class CbDocExpiror
             {
                 try
                 {
-                    List<String> docIds = _reader.getNext(_batchSize, 30000);
+                    List<String> docIds = _reader.getNext(_batchSize, 300000);
                     if (docIds.isEmpty() || _reader.isEmpty())
                     {
                         System.out.println("Doc list empty. Breaking.");
-                        _latch.countDown();
 
                         break;
                     }
 
-                    DbManager.bulkDelete(_bucket, docIds, 1000 * 60 * 5, 1);
+                    DbManager.bulkDelete(_bucket, docIds, 1000 * 60 * 15, 5);
 
                     System.out.println("Deleted:" + docIds.size());
                 }
@@ -336,6 +345,8 @@ public class CbDocExpiror
                     System.out.println("Exception. " + ex);
                 }
             }
+
+            _latch.countDown();
         }
     }
 }
